@@ -115,35 +115,101 @@ bool PrintJob::printPdf(const std::string& name,
   if (printer.empty()) {
     if (useModernDialog) {
       // --- MODERN OPTION (PrintDlgEx) ---
-      PRINTDLGEX pdx = {0};
-      pdx.lStructSize = sizeof(PRINTDLGEX);
-      pdx.hwndOwner = GetActiveWindow();
-      pdx.hDevMode = dm;
-      dm = nullptr; // dialog takes ownership; may replace with new alloc
-      pdx.hDevNames = nullptr;
-      pdx.hDC = nullptr;
-      
-      // Flags: Use PD_RETURNDC to get the context we need for PDFium
-      pdx.Flags = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE | PD_NOPAGENUMS | PD_NOSELECTION;
-      
-      pdx.nStartPage = START_PAGE_GENERAL;
-      pdx.nMaxPageRanges = 1;
-      PRINTPAGERANGE ranges[1] = {{1, 1}}; // Required structure for PDX
-      pdx.lpPageRanges = ranges;
-      
-      HRESULT hr = PrintDlgEx(&pdx);
+      //
+      // PrintDlgEx's IPrintDialogCallback requires the COM STA apartment.
+      // Flutter's platform thread is typically MTA, so lpCallback is silently
+      // ignored there.  Fix: run the dialog on a fresh STA worker thread and
+      // pump messages on the calling thread while we wait (required so the
+      // dialog can communicate with its hwndOwner).
+
+      struct DialogParams {
+        // inputs
+        HWND    hwndOwner  = nullptr;
+        HGLOBAL hDevMode   = nullptr;
+        std::vector<uint8_t> previewData;
+        // outputs
+        HRESULT  hr            = E_FAIL;
+        DWORD    resultAction  = 0;
+        HDC      hDC           = nullptr;
+        HGLOBAL  hDevModeOut   = nullptr;
+        HGLOBAL  hDevNamesOut  = nullptr;
+      };
+
+      DialogParams params;
+      params.hwndOwner  = GetActiveWindow();
+      params.hDevMode   = dm;
+      dm = nullptr;  // ownership transferred to params
+      params.previewData = previewData;
+
+      auto threadProc = [](LPVOID arg) -> DWORD {
+        auto* p = reinterpret_cast<DialogParams*>(arg);
+
+        // Initialize COM as STA — required for IPrintDialogCallback.
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        PRINTDLGEX pdx = {0};
+        pdx.lStructSize = sizeof(PRINTDLGEX);
+        pdx.hwndOwner   = p->hwndOwner;
+        pdx.hDevMode    = p->hDevMode;
+        p->hDevMode     = nullptr;  // dialog now owns it
+        pdx.hDevNames   = nullptr;
+        pdx.hDC         = nullptr;
+        pdx.Flags       = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE |
+                          PD_NOPAGENUMS | PD_NOSELECTION;
+        pdx.nStartPage     = START_PAGE_GENERAL;
+        pdx.nMaxPageRanges = 1;
+        PRINTPAGERANGE ranges[1] = {{1, 1}};
+        pdx.lpPageRanges = ranges;
+
+        // Attach preview callback when pre-rendered bytes are available.
+        PrintDialogCallback* callback = nullptr;
+        if (!p->previewData.empty()) {
+          callback = new PrintDialogCallback(p->previewData);
+          pdx.lpCallback = static_cast<IUnknown*>(
+              static_cast<IPrintDialogCallback*>(callback));
+        }
+
+        p->hr           = PrintDlgEx(&pdx);
+        p->resultAction = pdx.dwResultAction;
+        p->hDC          = pdx.hDC;
+        p->hDevModeOut  = pdx.hDevMode;
+        p->hDevNamesOut = pdx.hDevNames;
+
+        if (callback) {
+          callback->Release();
+          callback = nullptr;
+        }
+
+        CoUninitialize();
+        return 0;
+      };
+
+      HANDLE hThread = CreateThread(nullptr, 0, threadProc, &params, 0, nullptr);
+
+      // Pump the calling thread's message queue while the dialog is open so
+      // that it can repaint its owner window and avoid a deadlock.
+      while (true) {
+        DWORD ret = MsgWaitForMultipleObjects(1, &hThread, FALSE,
+                                              INFINITE, QS_ALLINPUT);
+        if (ret == WAIT_OBJECT_0) break;  // dialog thread finished
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+          TranslateMessage(&msg);
+          DispatchMessage(&msg);
+        }
+      }
+      CloseHandle(hThread);
 
       // Check if the user actually clicked "Print"
-      if (hr == S_OK && pdx.dwResultAction == PD_RESULT_PRINT) {
-        this->hDC = pdx.hDC;
-        this->hDevMode = pdx.hDevMode;
-        this->hDevNames = pdx.hDevNames;
-        //success = true;
+      if (params.hr == S_OK && params.resultAction == PD_RESULT_PRINT) {
+        this->hDC      = params.hDC;
+        this->hDevMode = params.hDevModeOut;
+        this->hDevNames = params.hDevNamesOut;
       } else {
         // User cancelled or error occurred — notify Dart so its future completes.
-        if (pdx.hDC) DeleteDC(pdx.hDC);
-        if (pdx.hDevMode) GlobalFree(pdx.hDevMode);
-        if (pdx.hDevNames) GlobalFree(pdx.hDevNames);
+        if (params.hDC)        DeleteDC(params.hDC);
+        if (params.hDevModeOut)  GlobalFree(params.hDevModeOut);
+        if (params.hDevNamesOut) GlobalFree(params.hDevNamesOut);
         printing->onCompleted(this, false, "");
         return false;
       }
