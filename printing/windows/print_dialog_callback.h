@@ -27,20 +27,18 @@
 namespace nfet {
 
 // COM implementation of IPrintDialogCallback + IObjectWithSite.
-// Provides live print preview inside the PrintDlgEx dialog by rendering
-// page 1 of the supplied PDF document via PDFium.
+// Provides live print preview inside the PrintDlgEx dialog by subclassing
+// the dialog's preview Static control and rendering page 1 via PDFium.
 //
 // Usage:
 //   PrintDialogCallback* cb = new PrintDialogCallback(pdfBytes);
 //   pdx.lpCallback = static_cast<IUnknown*>(
 //       static_cast<IPrintDialogCallback*>(cb));
 //   PrintDlgEx(&pdx);
-//   cb->Release();  // or let it go when done
+//   cb->Release();
 class PrintDialogCallback : public IPrintDialogCallback,
                             public IObjectWithSite {
  public:
-  // Takes ownership of the raw PDF bytes for preview rendering.
-  // Pass an empty vector to disable preview.
   explicit PrintDialogCallback(std::vector<uint8_t> previewData);
   ~PrintDialogCallback();
 
@@ -50,34 +48,36 @@ class PrintDialogCallback : public IPrintDialogCallback,
   ULONG STDMETHODCALLTYPE Release() override;
 
   // IPrintDialogCallback
-  // Called once the dialog is fully initialised — render the first preview.
   HRESULT STDMETHODCALLTYPE InitDone() override;
-  // Called when the user changes printer or settings — re-render.
   HRESULT STDMETHODCALLTYPE SelectionChange() override;
-  // Pass-through — return S_FALSE to let the dialog handle all messages.
+  // Hook WM_INITDIALOG to find and subclass the preview control.
   HRESULT STDMETHODCALLTYPE HandleMessage(HWND hDlg,
                                           UINT uMsg,
                                           WPARAM wParam,
                                           LPARAM lParam,
                                           LRESULT* pResult) override;
 
-  // IObjectWithSite — the dialog calls SetSite to hand us IPrintDialogServices.
+  // IObjectWithSite
   HRESULT STDMETHODCALLTYPE SetSite(IUnknown* pUnkSite) override;
   HRESULT STDMETHODCALLTYPE GetSite(REFIID riid, void** ppvSite) override;
 
  private:
   ULONG refCount_ = 1;
-  IUnknown* site_ = nullptr;         // held from SetSite
-  HWND previewHwnd_ = nullptr;       // child preview window inside the dialog
-  FPDF_DOCUMENT pdfDoc_ = nullptr;   // loaded once, kept for lifetime of dialog
-
+  IUnknown* site_ = nullptr;
+  HWND previewHwnd_ = nullptr;    // the subclassed Static preview control
+  WNDPROC origWndProc_ = nullptr; // saved for call-through on non-paint msgs
+  FPDF_DOCUMENT pdfDoc_ = nullptr;
   std::vector<uint8_t> previewData_;
 
-  // Renders page 0 of pdfDoc_ into previewHwnd_.
-  void renderPreview();
+  // Renders page 0 of pdfDoc_ into hdc, fitted to hwnd's client rect.
+  void renderInto(HDC hdc, HWND hwnd);
 
-  // Returns the preview child window from the dialog (best-effort search).
-  static HWND findPreviewWindow(HWND dlgHwnd);
+  // Subclass proc that replaces WM_PAINT on the preview Static.
+  static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg,
+                                         WPARAM wParam, LPARAM lParam);
+
+  // Finds the largest Static-class child window in dlgHwnd.
+  static HWND findPreviewStatic(HWND dlgHwnd);
 };
 
 }  // namespace nfet
