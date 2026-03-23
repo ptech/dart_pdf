@@ -135,10 +135,12 @@ bool PrintJob::printPdf(const std::string& name,
       // Attach preview callback when we have pre-rendered bytes.
       PrintDialogCallback* callback = nullptr;
       if (!previewData.empty()) {
+        MessageBox(NULL, L"previewData non-empty, creating callback", L"Debug", MB_OK);
         callback = new PrintDialogCallback(previewData);
         pdx.lpCallback = static_cast<IUnknown*>(
             static_cast<IPrintDialogCallback*>(callback));
-        // dwResultAction must start at 0 — already zeroed by {0}.
+      } else {
+        MessageBox(NULL, L"previewData is EMPTY — no callback set", L"Debug", MB_OK);
       }
 
       HRESULT hr = PrintDlgEx(&pdx);

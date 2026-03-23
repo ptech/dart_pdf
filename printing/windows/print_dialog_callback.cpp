@@ -115,16 +115,7 @@ HRESULT STDMETHODCALLTYPE PrintDialogCallback::GetSite(REFIID riid,
 // ---------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE PrintDialogCallback::InitDone() {
-  // Retrieve the dialog HWND via IPrintDialogServices and find the preview pane.
-  if (site_) {
-    IPrintDialogServices* svc = nullptr;
-    if (SUCCEEDED(site_->QueryInterface(IID_IPrintDialogServices,
-                                        reinterpret_cast<void**>(&svc)))) {
-      // The dialog hasn't laid out yet — defer to SelectionChange which is
-      // called right after InitDone when the printer selection is ready.
-      svc->Release();
-    }
-  }
+  MessageBox(NULL, L"InitDone called", L"Debug", MB_OK);
   return S_OK;
 }
 
