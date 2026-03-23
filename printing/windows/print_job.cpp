@@ -26,8 +26,66 @@
 #include <fstream>
 #include <iterator>
 #include <numeric>
+#include "print_dialog_callback.h"
 
 namespace nfet {
+
+// Shared parameter block for the PrintDlgEx STA helper thread.
+struct PrintDlgExParams {
+  // inputs
+  HWND    hwndOwner = nullptr;
+  HGLOBAL hDevMode  = nullptr;
+  std::vector<uint8_t> previewData;
+  // outputs
+  HRESULT hr           = E_FAIL;
+  DWORD   resultAction = 0;
+  HDC     hDC          = nullptr;
+  HGLOBAL hDevModeOut  = nullptr;
+  HGLOBAL hDevNamesOut = nullptr;
+};
+
+// Thread proc: initialises COM as STA and runs PrintDlgEx so that
+// IPrintDialogCallback is properly invoked (it requires STA).
+static DWORD WINAPI PrintDlgExThreadProc(LPVOID arg) {
+  auto* p = reinterpret_cast<PrintDlgExParams*>(arg);
+
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+  PRINTDLGEX pdx = {0};
+  pdx.lStructSize = sizeof(PRINTDLGEX);
+  pdx.hwndOwner   = p->hwndOwner;
+  pdx.hDevMode    = p->hDevMode;
+  p->hDevMode     = nullptr;  // dialog now owns it
+  pdx.hDevNames   = nullptr;
+  pdx.hDC         = nullptr;
+  pdx.Flags       = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE |
+                    PD_NOPAGENUMS | PD_NOSELECTION;
+  pdx.nStartPage     = START_PAGE_GENERAL;
+  pdx.nMaxPageRanges = 1;
+  PRINTPAGERANGE ranges[1] = {{1, 1}};
+  pdx.lpPageRanges = ranges;
+
+  PrintDialogCallback* callback = nullptr;
+  if (!p->previewData.empty()) {
+    callback = new PrintDialogCallback(p->previewData);
+    pdx.lpCallback = static_cast<IUnknown*>(
+        static_cast<IPrintDialogCallback*>(callback));
+  }
+
+  p->hr           = PrintDlgEx(&pdx);
+  p->resultAction = pdx.dwResultAction;
+  p->hDC          = pdx.hDC;
+  p->hDevModeOut  = pdx.hDevMode;
+  p->hDevNamesOut = pdx.hDevNames;
+
+  if (callback) {
+    callback->Release();
+    callback = nullptr;
+  }
+
+  CoUninitialize();
+  return 0;
+}
 
 const auto pdfDpi = 72;
 
@@ -122,76 +180,21 @@ bool PrintJob::printPdf(const std::string& name,
       // pump messages on the calling thread while we wait (required so the
       // dialog can communicate with its hwndOwner).
 
-      struct DialogParams {
-        // inputs
-        HWND    hwndOwner  = nullptr;
-        HGLOBAL hDevMode   = nullptr;
-        std::vector<uint8_t> previewData;
-        // outputs
-        HRESULT  hr            = E_FAIL;
-        DWORD    resultAction  = 0;
-        HDC      hDC           = nullptr;
-        HGLOBAL  hDevModeOut   = nullptr;
-        HGLOBAL  hDevNamesOut  = nullptr;
-      };
-
-      DialogParams params;
-      params.hwndOwner  = GetActiveWindow();
-      params.hDevMode   = dm;
+      PrintDlgExParams params;
+      params.hwndOwner   = GetActiveWindow();
+      params.hDevMode    = dm;
       dm = nullptr;  // ownership transferred to params
       params.previewData = previewData;
 
-      auto threadProc = [](LPVOID arg) -> DWORD {
-        auto* p = reinterpret_cast<DialogParams*>(arg);
-
-        // Initialize COM as STA — required for IPrintDialogCallback.
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-        PRINTDLGEX pdx = {0};
-        pdx.lStructSize = sizeof(PRINTDLGEX);
-        pdx.hwndOwner   = p->hwndOwner;
-        pdx.hDevMode    = p->hDevMode;
-        p->hDevMode     = nullptr;  // dialog now owns it
-        pdx.hDevNames   = nullptr;
-        pdx.hDC         = nullptr;
-        pdx.Flags       = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE |
-                          PD_NOPAGENUMS | PD_NOSELECTION;
-        pdx.nStartPage     = START_PAGE_GENERAL;
-        pdx.nMaxPageRanges = 1;
-        PRINTPAGERANGE ranges[1] = {{1, 1}};
-        pdx.lpPageRanges = ranges;
-
-        // Attach preview callback when pre-rendered bytes are available.
-        PrintDialogCallback* callback = nullptr;
-        if (!p->previewData.empty()) {
-          callback = new PrintDialogCallback(p->previewData);
-          pdx.lpCallback = static_cast<IUnknown*>(
-              static_cast<IPrintDialogCallback*>(callback));
-        }
-
-        p->hr           = PrintDlgEx(&pdx);
-        p->resultAction = pdx.dwResultAction;
-        p->hDC          = pdx.hDC;
-        p->hDevModeOut  = pdx.hDevMode;
-        p->hDevNamesOut = pdx.hDevNames;
-
-        if (callback) {
-          callback->Release();
-          callback = nullptr;
-        }
-
-        CoUninitialize();
-        return 0;
-      };
-
-      HANDLE hThread = CreateThread(nullptr, 0, threadProc, &params, 0, nullptr);
+      HANDLE hThread = CreateThread(nullptr, 0, PrintDlgExThreadProc,
+                                    &params, 0, nullptr);
 
       // Pump the calling thread's message queue while the dialog is open so
-      // that it can repaint its owner window and avoid a deadlock.
+      // that the dialog can repaint its owner window without deadlocking.
       while (true) {
         DWORD ret = MsgWaitForMultipleObjects(1, &hThread, FALSE,
                                               INFINITE, QS_ALLINPUT);
-        if (ret == WAIT_OBJECT_0) break;  // dialog thread finished
+        if (ret == WAIT_OBJECT_0) break;
         MSG msg;
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
           TranslateMessage(&msg);
@@ -200,14 +203,12 @@ bool PrintJob::printPdf(const std::string& name,
       }
       CloseHandle(hThread);
 
-      // Check if the user actually clicked "Print"
       if (params.hr == S_OK && params.resultAction == PD_RESULT_PRINT) {
-        this->hDC      = params.hDC;
-        this->hDevMode = params.hDevModeOut;
+        this->hDC       = params.hDC;
+        this->hDevMode  = params.hDevModeOut;
         this->hDevNames = params.hDevNamesOut;
       } else {
-        // User cancelled or error occurred — notify Dart so its future completes.
-        if (params.hDC)        DeleteDC(params.hDC);
+        if (params.hDC)          DeleteDC(params.hDC);
         if (params.hDevModeOut)  GlobalFree(params.hDevModeOut);
         if (params.hDevNamesOut) GlobalFree(params.hDevNamesOut);
         printing->onCompleted(this, false, "");
