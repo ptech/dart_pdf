@@ -115,6 +115,11 @@ bool PrintJob::printPdf(const std::string& name,
 
   if (printer.empty()) {
     if (useModernDialog) {
+      // PrintDlgEx requires COM to be initialized on the calling thread
+      // for lpCallback (IPrintDialogCallback) to be invoked at all.
+      const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+      const bool comInitedHere = SUCCEEDED(comHr);  // S_FALSE = already inited
+
       // --- MODERN OPTION (PrintDlgEx) ---
       PRINTDLGEX pdx = {0};
       pdx.lStructSize = sizeof(PRINTDLGEX);
@@ -160,8 +165,10 @@ bool PrintJob::printPdf(const std::string& name,
         if (pdx.hDC) DeleteDC(pdx.hDC);
         if (pdx.hDevMode) GlobalFree(pdx.hDevMode);
         if (pdx.hDevNames) GlobalFree(pdx.hDevNames);
+        if (comInitedHere) CoUninitialize();
         return false;
       }
+      if (comInitedHere) CoUninitialize();
     } else {
       // --- CLASSIC DEFAULT  ---
       PRINTDLG pd;
