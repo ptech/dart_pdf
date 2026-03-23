@@ -118,8 +118,8 @@ bool PrintJob::printPdf(const std::string& name,
       PRINTDLGEX pdx = {0};
       pdx.lStructSize = sizeof(PRINTDLGEX);
       pdx.hwndOwner = GetActiveWindow();
-      //pdx.hDevMode = hDevModeAlloc;
       pdx.hDevMode = dm;
+      dm = nullptr; // dialog takes ownership; may replace with new alloc
       pdx.hDevNames = nullptr;
       pdx.hDC = nullptr;
       
