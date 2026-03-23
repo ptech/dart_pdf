@@ -312,7 +312,7 @@ void PrintJob::writeJob(std::vector<uint8_t> data) {
 
   DeleteDC(hDC);
   GlobalFree(hDevNames);
-  ClosePrinter(hDevMode);
+  GlobalFree(hDevMode);
 
   printing->onCompleted(this, true, "");
 }
