@@ -16,6 +16,7 @@
 
 #include "print_job.h"
 #include "printing.h"
+#include "print_dialog_callback.h"
 
 #include <fpdfview.h>
 #include <objbase.h>
@@ -122,29 +123,42 @@ bool PrintJob::printPdf(const std::string& name,
       dm = nullptr; // dialog takes ownership; may replace with new alloc
       pdx.hDevNames = nullptr;
       pdx.hDC = nullptr;
-      
+
       // Flags: Use PD_RETURNDC to get the context we need for PDFium
       pdx.Flags = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE | PD_NOPAGENUMS | PD_NOSELECTION;
-      
+
       pdx.nStartPage = START_PAGE_GENERAL;
       pdx.nMaxPageRanges = 1;
-      PRINTPAGERANGE ranges[1] = {{1, 1}}; // Required structure for PDX
+      PRINTPAGERANGE ranges[1] = {{1, 1}};
       pdx.lpPageRanges = ranges;
-      
+
+      // Attach preview callback when we have pre-rendered bytes.
+      PrintDialogCallback* callback = nullptr;
+      if (!previewData.empty()) {
+        callback = new PrintDialogCallback(previewData);
+        pdx.lpCallback = static_cast<IUnknown*>(
+            static_cast<IPrintDialogCallback*>(callback));
+        // dwResultAction must start at 0 — already zeroed by {0}.
+      }
+
       HRESULT hr = PrintDlgEx(&pdx);
+
+      if (callback) {
+        callback->Release();
+        callback = nullptr;
+      }
 
       // Check if the user actually clicked "Print"
       if (hr == S_OK && pdx.dwResultAction == PD_RESULT_PRINT) {
         this->hDC = pdx.hDC;
         this->hDevMode = pdx.hDevMode;
         this->hDevNames = pdx.hDevNames;
-        //success = true;
       } else {
         // User cancelled or error occurred
         if (pdx.hDC) DeleteDC(pdx.hDC);
         if (pdx.hDevMode) GlobalFree(pdx.hDevMode);
         if (pdx.hDevNames) GlobalFree(pdx.hDevNames);
-        return false; 
+        return false;
       }
     } else {
       // --- CLASSIC DEFAULT  ---

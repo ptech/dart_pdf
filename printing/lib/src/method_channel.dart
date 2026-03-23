@@ -190,6 +190,19 @@ class MethodChannelPrinting extends PrintingPlatform {
       onLayout: onLayout,
     );
 
+    // Pre-render at A4 for the PrintDlgEx preview panel on Windows.
+    // The real onLayout still fires after the dialog closes with the actual
+    // printer page size, so print quality is unaffected.
+    Uint8List? previewDoc;
+    if (useModernDialog) {
+      const previewFormat = PdfPageFormat.a4;
+      try {
+        previewDoc = await onLayout(previewFormat);
+      } catch (_) {
+        // Preview is best-effort — ignore errors and open dialog without it.
+      }
+    }
+
     final params = <String, dynamic>{
       if (printer != null) 'printer': printer.url,
       'name': name,
@@ -205,6 +218,7 @@ class MethodChannelPrinting extends PrintingPlatform {
       'outputType': outputType.index,
       'forceCustomPrintPaper': forceCustomPrintPaper,
       'useModernDialog': useModernDialog,
+      if (previewDoc != null) 'previewDoc': Uint8List.fromList(previewDoc),
     };
 
     await _channel.invokeMethod<int>('printPdf', params);

@@ -20,6 +20,7 @@
 #include <flutter/standard_method_codec.h>
 
 #include <windows.h>
+#include <commdlg.h>
 
 #include <map>
 #include <memory>
@@ -63,11 +64,19 @@ class PrintJob {
   HGLOBAL hDevNames = nullptr;
   HDC hDC = nullptr;
   std::string documentName;
+  // Pre-rendered PDF bytes for the PrintDlgEx preview panel.
+  // When non-empty, PrintDialogCallback uses these to paint page 1.
+  std::vector<uint8_t> previewData;
 
  public:
   PrintJob(Printing* printing, int index);
 
   int id() { return index; }
+
+  // Store pre-rendered PDF bytes to show as preview inside the print dialog.
+  void setPreviewData(std::vector<uint8_t> data) {
+    previewData = std::move(data);
+  }
 
   std::vector<Printer> listPrinters();
 

@@ -51,7 +51,9 @@ add_library(${PLUGIN_NAME} SHARED
             "printing_plugin.cpp"
             "include/printing/printing_plugin.h"
             "print_job.cpp"
-            "print_job.h")
+            "print_job.h"
+            "print_dialog_callback.cpp"
+            "print_dialog_callback.h")
 
 apply_standard_settings(${PLUGIN_NAME})
 set_target_properties(${PLUGIN_NAME} PROPERTIES CXX_VISIBILITY_PRESET hidden)
