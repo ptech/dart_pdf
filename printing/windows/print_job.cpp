@@ -140,11 +140,12 @@ bool PrintJob::printPdf(const std::string& name,
         this->hDevNames = pdx.hDevNames;
         //success = true;
       } else {
-        // User cancelled or error occurred
+        // User cancelled or error occurred — notify Dart so its future completes.
         if (pdx.hDC) DeleteDC(pdx.hDC);
         if (pdx.hDevMode) GlobalFree(pdx.hDevMode);
         if (pdx.hDevNames) GlobalFree(pdx.hDevNames);
-        return false; 
+        printing->onCompleted(this, false, "");
+        return false;
       }
     } else {
       // --- CLASSIC DEFAULT  ---
@@ -169,7 +170,7 @@ bool PrintJob::printPdf(const std::string& name,
         printing->onCompleted(this, false, "");
         DeleteDC(hDC);
         GlobalFree(hDevNames);
-        ClosePrinter(hDevMode);
+        GlobalFree(hDevMode);
         return true;
       }
 
