@@ -67,17 +67,21 @@ class PrintDialogCallback : public IPrintDialogCallback,
 
  private:
   ULONG refCount_ = 1;
-  IUnknown* site_ = nullptr;         // held from SetSite
-  HWND previewHwnd_ = nullptr;       // child preview window inside the dialog
-  FPDF_DOCUMENT pdfDoc_ = nullptr;   // loaded once, kept for lifetime of dialog
-
+  IUnknown* site_ = nullptr;
+  HWND previewHwnd_ = nullptr;
+  WNDPROC origWndProc_ = nullptr;  // saved on subclass, restored in destructor
+  FPDF_DOCUMENT pdfDoc_ = nullptr;
   std::vector<uint8_t> previewData_;
 
-  // Renders page 0 of pdfDoc_ into previewHwnd_.
-  void renderPreview();
+  // Renders page 0 into hdc (called from PreviewWndProc's WM_PAINT).
+  void renderInto(HDC hdc, HWND hwnd);
 
-  // Returns the preview child window from the dialog (best-effort search).
-  static HWND findPreviewWindow(HWND dlgHwnd);
+  // Subclass WndProc that owns WM_PAINT on the preview Static.
+  static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg,
+                                         WPARAM wParam, LPARAM lParam);
+
+  // Finds the largest Static-class descendant of dlgHwnd by screen area.
+  static HWND findPreviewStatic(HWND dlgHwnd);
 };
 
 }  // namespace nfet

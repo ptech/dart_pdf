@@ -39,6 +39,12 @@ PrintDialogCallback::PrintDialogCallback(std::vector<uint8_t> previewData)
 }
 
 PrintDialogCallback::~PrintDialogCallback() {
+  // Restore subclassed window proc before we disappear.
+  if (previewHwnd_ && origWndProc_) {
+    SetWindowLongPtr(previewHwnd_, GWLP_WNDPROC,
+                     reinterpret_cast<LONG_PTR>(origWndProc_));
+    SetWindowLongPtr(previewHwnd_, GWLP_USERDATA, 0);
+  }
   if (pdfDoc_) {
     FPDF_CloseDocument(pdfDoc_);
     FPDF_DestroyLibrary();
@@ -123,23 +129,27 @@ HRESULT STDMETHODCALLTYPE PrintDialogCallback::InitDone() {
 }
 
 HRESULT STDMETHODCALLTYPE PrintDialogCallback::SelectionChange() {
+  MessageBox(NULL, L"SelectionChange called", L"Debug", MB_OK);
   if (!pdfDoc_ || !site_) return S_OK;
 
-  // Find the preview HWND lazily.
+  // On first call, the dialog is fully laid out — find and subclass the
+  // preview Static so we own its WM_PAINT (GetDC alone gets overdrawn).
   if (!previewHwnd_) {
-    IPrintDialogServices* svc = nullptr;
-    if (SUCCEEDED(site_->QueryInterface(IID_IPrintDialogServices,
-                                        reinterpret_cast<void**>(&svc)))) {
-      // Walk up from any window we know to find the dialog itself.
-      // We use GetActiveWindow as a fallback heuristic — the dialog is modal.
-      HWND dlgHwnd = GetActiveWindow();
-      previewHwnd_ = findPreviewWindow(dlgHwnd);
-      svc->Release();
+    HWND dlgHwnd = GetActiveWindow();
+    previewHwnd_ = findPreviewStatic(dlgHwnd);
+    if (previewHwnd_) {
+      SetWindowLongPtr(previewHwnd_, GWLP_USERDATA,
+                       reinterpret_cast<LONG_PTR>(this));
+      origWndProc_ = reinterpret_cast<WNDPROC>(
+          SetWindowLongPtr(previewHwnd_, GWLP_WNDPROC,
+                           reinterpret_cast<LONG_PTR>(&PreviewWndProc)));
     }
   }
 
   if (previewHwnd_) {
-    renderPreview();
+    // Trigger WM_PAINT — PreviewWndProc renders the PDF there.
+    InvalidateRect(previewHwnd_, nullptr, TRUE);
+    UpdateWindow(previewHwnd_);
   }
 
   return S_OK;
@@ -156,101 +166,107 @@ PrintDialogCallback::HandleMessage(HWND /*hDlg*/,
 }
 
 // ---------------------------------------------------------------------------
-// Preview rendering helpers
+// Subclass WndProc — takes ownership of WM_PAINT on the preview Static.
 // ---------------------------------------------------------------------------
 
-void PrintDialogCallback::renderPreview() {
-  if (!pdfDoc_ || !previewHwnd_) return;
+LRESULT CALLBACK PrintDialogCallback::PreviewWndProc(HWND hwnd, UINT msg,
+                                                     WPARAM wParam,
+                                                     LPARAM lParam) {
+  auto* self = reinterpret_cast<PrintDialogCallback*>(
+      GetWindowLongPtr(hwnd, GWLP_USERDATA));
+
+  if (msg == WM_ERASEBKGND) return 1;  // suppress flicker
+
+  if (msg == WM_PAINT && self && self->pdfDoc_) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    self->renderInto(hdc, hwnd);
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+
+  return self ? CallWindowProc(self->origWndProc_, hwnd, msg, wParam, lParam)
+              : DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+void PrintDialogCallback::renderInto(HDC hdc, HWND hwnd) {
+  if (!pdfDoc_) return;
 
   auto page = FPDF_LoadPage(pdfDoc_, 0);
   if (!page) return;
 
   RECT rc;
-  GetClientRect(previewHwnd_, &rc);
+  GetClientRect(hwnd, &rc);
   const int panelW = rc.right - rc.left;
   const int panelH = rc.bottom - rc.top;
-  if (panelW <= 0 || panelH <= 0) {
-    FPDF_ClosePage(page);
-    return;
-  }
+  if (panelW <= 0 || panelH <= 0) { FPDF_ClosePage(page); return; }
 
-  // Scale the page to fit inside the panel while preserving aspect ratio.
   const double pdfW = FPDF_GetPageWidth(page);
   const double pdfH = FPDF_GetPageHeight(page);
-  if (pdfW <= 0 || pdfH <= 0) {
-    FPDF_ClosePage(page);
-    return;
-  }
+  if (pdfW <= 0 || pdfH <= 0) { FPDF_ClosePage(page); return; }
 
-  const double scaleX = panelW / pdfW;
-  const double scaleY = panelH / pdfH;
+  const int margin = 8;
+  const double scaleX = (panelW - 2 * margin) / pdfW;
+  const double scaleY = (panelH - 2 * margin) / pdfH;
   const double scale = (scaleX < scaleY) ? scaleX : scaleY;
-
   const int bmpW = static_cast<int>(pdfW * scale);
   const int bmpH = static_cast<int>(pdfH * scale);
 
-  // Create an FPDF bitmap backed by a DIB section for direct GDI use.
-  auto bitmap = FPDFBitmap_Create(bmpW, bmpH, 1 /* alpha */);
-  if (!bitmap) {
-    FPDF_ClosePage(page);
-    return;
-  }
-  FPDFBitmap_FillRect(bitmap, 0, 0, bmpW, bmpH, 0xFFFFFFFF);  // white bg
+  auto bitmap = FPDFBitmap_Create(bmpW, bmpH, 1);
+  if (!bitmap) { FPDF_ClosePage(page); return; }
+  FPDFBitmap_FillRect(bitmap, 0, 0, bmpW, bmpH, 0xFFFFFFFF);
   FPDF_RenderPageBitmap(bitmap, page, 0, 0, bmpW, bmpH, 0, FPDF_ANNOT);
 
-  // Build a BITMAPINFO for the raw BGRA data from PDFium.
   BITMAPINFO bmi{};
   bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
   bmi.bmiHeader.biWidth = bmpW;
-  bmi.bmiHeader.biHeight = -bmpH;  // top-down
+  bmi.bmiHeader.biHeight = -bmpH;
   bmi.bmiHeader.biPlanes = 1;
   bmi.bmiHeader.biBitCount = 32;
   bmi.bmiHeader.biCompression = BI_RGB;
 
-  const int offsetX = (panelW - bmpW) / 2;
-  const int offsetY = (panelH - bmpH) / 2;
+  const int pageX = (panelW - bmpW) / 2;
+  const int pageY = (panelH - bmpH) / 2;
 
-  HDC hdc = GetDC(previewHwnd_);
-  // Fill background.
-  HBRUSH bgBrush = CreateSolidBrush(RGB(240, 240, 240));
+  // Fill background, draw page border, blit pixels.
+  HBRUSH bgBrush = CreateSolidBrush(RGB(220, 220, 220));
   FillRect(hdc, &rc, bgBrush);
   DeleteObject(bgBrush);
-
-  // Blit PDFium pixels.
-  StretchDIBits(hdc, offsetX, offsetY, bmpW, bmpH, 0, 0, bmpW, bmpH,
+  RECT border = {pageX - 1, pageY - 1, pageX + bmpW + 1, pageY + bmpH + 1};
+  FrameRect(hdc, &border, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+  StretchDIBits(hdc, pageX, pageY, bmpW, bmpH, 0, 0, bmpW, bmpH,
                 FPDFBitmap_GetBuffer(bitmap), &bmi, DIB_RGB_COLORS, SRCCOPY);
-
-  ReleaseDC(previewHwnd_, hdc);
 
   FPDFBitmap_Destroy(bitmap);
   FPDF_ClosePage(page);
 }
 
-// Breadth-first search for the preview child window.
-// PrintDlgEx embeds a preview area as a child window — its class name varies
-// by Windows version but the panel is typically the tallest child by height.
-// We pick the largest child window as a best-effort heuristic.
-HWND PrintDialogCallback::findPreviewWindow(HWND dlgHwnd) {
+// Finds the largest Static-class child window — that's the preview pane.
+// Called on first SelectionChange when the dialog is fully laid out.
+HWND PrintDialogCallback::findPreviewStatic(HWND dlgHwnd) {
   if (!dlgHwnd) return nullptr;
 
-  // Walk all immediate children and pick the one with the largest area.
-  struct SearchState {
-    HWND best = nullptr;
-    LONG bestArea = 0;
-  } state;
+  struct State { HWND best = nullptr; LONG bestArea = 0; } state;
 
   EnumChildWindows(
       dlgHwnd,
       [](HWND hwnd, LPARAM lParam) -> BOOL {
-        auto* s = reinterpret_cast<SearchState*>(lParam);
+        auto* s = reinterpret_cast<State*>(lParam);
+
+        // Only Static-class windows — label statics are tiny, preview is big.
+        wchar_t cls[64] = {};
+        GetClassNameW(hwnd, cls, 64);
+        if (_wcsicmp(cls, L"Static") != 0) return TRUE;
+
+        // Use screen coords so multiple (0,0,w,h) rects don't mislead us.
         RECT r;
-        if (GetClientRect(hwnd, &r)) {
-          LONG area = (r.right - r.left) * (r.bottom - r.top);
-          if (area > s->bestArea) {
-            s->bestArea = area;
-            s->best = hwnd;
-          }
-        }
+        GetWindowRect(hwnd, &r);
+        LONG area = (r.right - r.left) * (r.bottom - r.top);
+        if (area > s->bestArea) { s->bestArea = area; s->best = hwnd; }
         return TRUE;
       },
       reinterpret_cast<LPARAM>(&state));
