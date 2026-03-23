@@ -17,7 +17,7 @@
 #include "print_dialog_callback.h"
 
 #include <commdlg.h>
-#include <shlobj.h>
+#include <ocidl.h>
 #include <objbase.h>
 
 namespace nfet {

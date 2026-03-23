@@ -19,7 +19,7 @@
 
 #include <windows.h>
 #include <commdlg.h>
-#include <unknwn.h>
+#include <ocidl.h>   // IObjectWithSite
 #include <fpdfview.h>
 
 #include <vector>
