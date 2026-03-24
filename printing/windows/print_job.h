@@ -63,11 +63,16 @@ class PrintJob {
   HGLOBAL hDevNames = nullptr;
   HDC hDC = nullptr;
   std::string documentName;
+  std::vector<uint8_t> previewData;
 
  public:
   PrintJob(Printing* printing, int index);
 
   int id() { return index; }
+
+  void setPreviewData(std::vector<uint8_t> data) {
+    previewData = std::move(data);
+  }
 
   std::vector<Printer> listPrinters();
 

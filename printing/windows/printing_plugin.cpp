@@ -89,6 +89,12 @@ class PrintingPlugin : public flutter::Plugin {
       auto vJob = arguments->find(flutter::EncodableValue("job"));
       auto jobNum = vJob != arguments->end() ? std::get<int>(vJob->second) : -1;
       auto job = new PrintJob{&printing, jobNum};
+      // Optional pre-rendered bytes for PrintDlgEx preview.
+      auto vPreview = arguments->find(flutter::EncodableValue("previewDoc"));
+      if (vPreview != arguments->end() && !vPreview->second.IsNull()) {
+        job->setPreviewData(
+            std::get<std::vector<uint8_t>>(vPreview->second));
+      }
       auto res =
           job->printPdf(name, printer, width, height, usePrinterSettings, useModernDialog);
       if (!res) {

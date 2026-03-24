@@ -190,6 +190,17 @@ class MethodChannelPrinting extends PrintingPlatform {
       onLayout: onLayout,
     );
 
+    // On Windows modern dialog, pre-render at A4 so the native
+    // IPrintDialogCallback has bytes to show in the preview panel.
+    Uint8List? previewDoc;
+    if (useModernDialog) {
+      try {
+        previewDoc = await onLayout(PdfPageFormat.a4);
+      } catch (_) {
+        // Best-effort — open dialog without preview if this fails.
+      }
+    }
+
     final params = <String, dynamic>{
       if (printer != null) 'printer': printer.url,
       'name': name,
@@ -205,6 +216,7 @@ class MethodChannelPrinting extends PrintingPlatform {
       'outputType': outputType.index,
       'forceCustomPrintPaper': forceCustomPrintPaper,
       'useModernDialog': useModernDialog,
+      if (previewDoc != null) 'previewDoc': Uint8List.fromList(previewDoc),
     };
 
     await _channel.invokeMethod<int>('printPdf', params);
