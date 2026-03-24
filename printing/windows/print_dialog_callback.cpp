@@ -179,8 +179,9 @@ void PrintDialogCallback::renderInto(HDC hdc, HWND hwnd) {
   if (pdfW <= 0 || pdfH <= 0) { FPDF_ClosePage(page); return; }
 
   const int margin = 8;
-  const double scale = std::min((panelW - 2*margin) / pdfW,
-                                (panelH - 2*margin) / pdfH);
+  const double scaleX = (panelW - 2*margin) / pdfW;
+  const double scaleY = (panelH - 2*margin) / pdfH;
+  const double scale = scaleX < scaleY ? scaleX : scaleY;
   const int bmpW = static_cast<int>(pdfW * scale);
   const int bmpH = static_cast<int>(pdfH * scale);
 
