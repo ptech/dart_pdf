@@ -110,6 +110,7 @@ class MockPrinting extends Mock
     bool usePrinterSettings,
     OutputType outputType,
     bool forceCustomPrintPaper,
+    bool windowsModernDialog,
   ) async =>
       true;
 
